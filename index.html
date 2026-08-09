@@ -17,10 +17,10 @@
   :root{
     --ink:#1c1a17; --paper:#f4efe6; --panel:#fffdf8; --rule:#d8cfbe;
     --accent:#b5471f; --muted:#8a7f6d;
-    --free:#2f6b4f;      /* pine green  — fee=no        */
-    --paid:#b8861b;      /* amber       — fee=yes       */
-    --unknown:#9aa0a6;   /* grey        — no fee tag    */
-    --pr:#2563eb;        /* blue        — park and ride */
+    --free:#000000;      /* black       — fee=no        */
+    --paid:#8e44ad;      /* purple      — fee=yes       */
+    --unknown:#2563eb;   /* blue        — no fee tag    */
+    --pr:#1f9d55;        /* green       — park and ride */
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;font-family:Georgia,"Times New Roman",serif;color:var(--ink);background:var(--paper)}
@@ -55,12 +55,21 @@
   .maplibregl-popup-content{font-family:Georgia,serif;font-size:13px;max-width:280px}
   .maplibregl-popup-content h3{margin:0 0 6px;font-size:15px}
   .maplibregl-popup-content .t{color:var(--muted);font-size:12px;line-height:1.5}
+  .maplibregl-popup-content a{color:var(--accent)}
+  .maplibregl-popup-content .timelimit{background:#fff3e0;border:1px solid #e0b878;border-radius:8px;
+    padding:6px 8px;margin-top:8px;font-size:12px;color:#8a5a12;line-height:1.4;font-weight:bold}
+  .maplibregl-popup-content .caution{background:#eef2fb;border:1px solid #9db4e0;border-radius:8px;
+    padding:6px 8px;margin-top:8px;font-size:12px;color:#2b3f6b;line-height:1.4}
   .pill{display:inline-block;padding:2px 8px;border-radius:999px;color:#fff;font-size:11px;font-weight:bold}
 
   /* locate control on the map */
   .locate{appearance:none;border:none;background:#fff;width:29px;height:29px;cursor:pointer;
           font-size:15px;line-height:29px;text-align:center}
   .locate:hover{background:#f2ede3}
+  .limlabel{background:#1c1a17;color:#fff;font-family:Georgia,serif;font-size:11px;font-weight:bold;
+    padding:0 5px;border-radius:8px;border:1px solid #fff;line-height:1.6;pointer-events:none;
+    box-shadow:0 1px 2px rgba(0,0,0,.3);white-space:nowrap}
+  .evmark{pointer-events:auto;cursor:pointer}
 
   /* ---- start screen ---- */
   #start{position:fixed;inset:0;z-index:20;background:var(--paper);overflow-y:auto;
@@ -82,6 +91,10 @@
   .city .nm{font-size:16px}
   .city .cc{color:var(--muted);font-size:12px;font-style:italic}
   .city .meta{color:var(--muted);font-size:12px;white-space:nowrap}
+  .city-search{width:100%;appearance:none;border:1px solid var(--rule);border-radius:10px;
+    padding:10px 12px;margin-bottom:8px;font-family:inherit;font-size:14px;background:#fff;color:var(--ink)}
+  .city-search:focus{outline:none;border-color:var(--accent)}
+  .city-more{font-size:12px;color:var(--muted);text-align:center;padding:8px}
   .foot{font-size:11px;color:var(--muted);line-height:1.5;margin-top:18px;border-top:1px solid var(--rule);padding-top:12px}
   .foot a{color:var(--accent)}
   .filelink{color:var(--accent);cursor:pointer;text-decoration:underline}
@@ -101,6 +114,7 @@
     <p class="geo-note" id="geoNote"></p>
 
     <p class="city-h">Pick a city</p>
+    <input id="citySearch" class="city-search" placeholder="Search city…" autocomplete="off" />
     <div id="cityList"></div>
 
     <p class="foot">
@@ -129,13 +143,17 @@
         <label><input type="checkbox" id="fPaid">
           <span class="swatch" style="background:var(--paid)"></span> Paid (fee = yes)</label>
         <label><input type="checkbox" id="fUnknown">
-          <span class="swatch" style="background:var(--unknown)"></span> Fee not recorded</label>
+          <span class="swatch" style="background:var(--unknown)"></span> Not recorded</label>
         <label><input type="checkbox" id="fPR">
-          <span class="swatch" style="background:var(--pr)"></span> Park &amp; ride only</label>
+          <span class="swatch" style="background:var(--pr)"></span> Park &amp; ride</label>
+        <label><input type="checkbox" id="fEV">
+          <span class="swatch" style="background:#1c1a17;color:#fff;font-size:9px;display:inline-flex;align-items:center;justify-content:center">⚡</span> EV charging</label>
       </div>
       <div class="legend-note">
         Outlines are the real mapped shape of each car park. Circles are entries
-        mapped as a single point rather than an area.
+        mapped as a single point rather than an area.<br>
+        <b style="color:#c77d0a">Amber dashed</b> = time-limited — set your parking disc.<br>
+        ⚡ = EV charging (OSM parking tags + Open Charge Map).
       </div>
     </div>
   </div>
@@ -144,20 +162,19 @@
 
 <script>
 /* =========================================================================
-   CITY MANIFEST
-   To add a city:
-     1. Run:  python parking_probe.py "Lisbon, Portugal" --save
-     2. Copy out/<slug>.json into  cities/
-     3. Add one line here with its centre (from the JSON's "centre") and stats.
-   `lat`/`lon` are only used to pick the nearest city for "near me".
+   CITY LIST
+   The app fetches cities.json (written by build_italy.py, or any build) on load
+   and shows everything in it. If cities.json is missing, it falls back to
+   DEFAULT_CITIES below so the app still works out of the box.
    ========================================================================= */
-const CITIES = [
+const DEFAULT_CITIES = [
   { name:"Rome", country:"Italy", file:"cities/rome-41485.json",
     lat:41.89332, lon:12.482932, total:5455, fee_pct:29.7 },
 ];
+let CITIES = DEFAULT_CITIES;
 
 const $ = id => document.getElementById(id);
-let DATA = null, userMarker = null;
+let DATA = null, userMarker = null, limitMarkers = [], chargerMarkers = [];
 
 /* If the map library didn't load (offline, or a network that blocks the CDN),
    fail with a clear message instead of a dead screen. */
@@ -205,6 +222,11 @@ map.addControl(new LocateControl(), 'top-right');
 /* ---------------- categorisation ---------------- */
 function isPR(t){ const v = String(t.park_ride ?? 'no').toLowerCase(); return v !== 'no' && v !== ''; }
 function categoryOf(t){ return t.fee === 'no' ? 'free' : t.fee === 'yes' ? 'paid' : 'unknown'; }
+// "Business" parking: tagged fee=no but access=customers — a shop/garage lot you
+// can only use if you're a customer. Confusing to show as free, so we hide it.
+function isBusiness(t){ return (t.access || '') === 'customers'; }
+// EV charging present here (capacity:charging tag with a real value).
+function hasEV(t){ const c = t['capacity:charging']; return c != null && c !== '' && !['0','no','none'].includes(String(c).toLowerCase()); }
 
 /* Overpass rings are [lat, lon]; GeoJSON wants [lon, lat]. Getting this
    backwards puts Rome in the Indian Ocean, which is at least obvious. */
@@ -213,12 +235,20 @@ function toGeoJSON(elements){
   const pts   = { type:'FeatureCollection', features: [] };
   for (const el of elements){
     const t = el.tags || {};
+    const pay = Object.keys(t)
+      .filter(k => k.indexOf('payment:') === 0 &&
+                   ['yes','only','true','1'].includes(String(t[k]).toLowerCase()))
+      .map(k => k.slice(8));
     const props = {
       cat: categoryOf(t), pr: isPR(t) ? 1 : 0,
       name: t.name || '', fee: t.fee || '', charge: t.charge || '',
       capacity: t.capacity || '', parking: t.parking || '',
       maxstay: t.maxstay || '', access: t.access || '',
-      km: el.km ?? null, cond: t['fee:conditional'] || ''
+      lim: (t.maxstay && String(t.maxstay).toLowerCase() !== 'no') ? 1 : 0,
+      ev: hasEV(t) ? 1 : 0, chg: t['capacity:charging'] || '',
+      hours: t.opening_hours || '', operator: t.operator || '', pay: pay.join(','),
+      km: el.km ?? null, cond: t['fee:conditional'] || '',
+      lat: el.lat ?? null, lon: el.lon ?? null
     };
     if (el.ring && el.ring.length > 3){
       polys.features.push({ type:'Feature', properties: props,
@@ -233,26 +263,30 @@ function toGeoJSON(elements){
 
 const COLOUR = [
   'case',
-  ['==', ['get','pr'], 1], '#2563eb',
-  ['==', ['get','cat'], 'free'], '#2f6b4f',
-  ['==', ['get','cat'], 'paid'], '#b8861b',
-  '#9aa0a6'
+  ['==', ['get','pr'], 1], '#1f9d55',
+  ['==', ['get','cat'], 'free'], '#000000',
+  ['==', ['get','cat'], 'paid'], '#8e44ad',
+  '#2563eb'
 ];
 
 function currentFilter(){
-  const on = [];
-  if ($('fFree').checked)    on.push('free');
-  if ($('fPaid').checked)    on.push('paid');
-  if ($('fUnknown').checked) on.push('unknown');
-  const catFilter = on.length
-    ? ['in', ['get','cat'], ['literal', on]]
-    : ['==', ['get','cat'], '___none___'];
-  return $('fPR').checked ? ['all', ['==', ['get','pr'], 1], catFilter] : catFilter;
+  // Each checkbox ADDS its spots (a union), so ticking EV or Park & ride shows
+  // those spots alongside the fee categories instead of intersecting them away.
+  const any = [];
+  if ($('fFree').checked)    any.push(['==', ['get','cat'], 'free']);
+  if ($('fPaid').checked)    any.push(['==', ['get','cat'], 'paid']);
+  if ($('fUnknown').checked) any.push(['==', ['get','cat'], 'unknown']);
+  if ($('fPR').checked)      any.push(['==', ['get','pr'], 1]);
+  if ($('fEV').checked)      any.push(['==', ['get','ev'], 1]);
+  return any.length ? ['any', ...any] : ['==', ['get','cat'], '___none___'];
 }
 function applyFilter(){
   if (!map.getLayer('poly-fill')) return;
   const f = currentFilter();
   ['poly-fill','poly-line','pts'].forEach(l => map.setFilter(l, f));
+  if (map.getLayer('poly-limit')) map.setFilter('poly-limit', ['all', f, ['==', ['get','lim'], 1]]);
+  updateChargerMarkers();
+  updateLimitMarkers();
 }
 
 function fitTo(elements){
@@ -265,26 +299,60 @@ function fitTo(elements){
 /* ---------------- render a loaded city ---------------- */
 function render(data){
   DATA = data;
-  const els = data.elements || [];
+  // Drop customers-only business parking entirely — never displayed.
+  const els = (data.elements || []).filter(e => !isBusiness(e.tags || {}));
   const { polys, pts } = toGeoJSON(els);
 
-  for (const id of ['poly-fill','poly-line','pts'])  if (map.getLayer(id))  map.removeLayer(id);
+  for (const id of ['poly-fill','poly-line','poly-limit','pts'])  if (map.getLayer(id))  map.removeLayer(id);
   for (const id of ['polys','pts'])                  if (map.getSource(id)) map.removeSource(id);
 
   map.addSource('polys', { type:'geojson', data: polys });
   map.addSource('pts',   { type:'geojson', data: pts });
+  // "Not recorded" (grey) marks are de-emphasised — fainter and smaller — so
+  // free / paid / park&ride stay dominant and the unknowns recede to a backdrop.
+  const dim = ['all', ['==', ['get','cat'], 'unknown'], ['!=', ['get','pr'], 1]];
   map.addLayer({ id:'poly-fill', type:'fill', source:'polys',
-    paint:{ 'fill-color': COLOUR, 'fill-opacity':0.45 } });
+    paint:{ 'fill-color': COLOUR,
+            'fill-opacity':['case', dim, 0.3, 0.5] } });
   map.addLayer({ id:'poly-line', type:'line', source:'polys',
-    paint:{ 'line-color': COLOUR, 'line-width':1.5 } });
+    paint:{ 'line-color': COLOUR,
+            'line-width':['interpolate',['linear'],['zoom'], 10,1, 14,1.5, 17,3.5, 19,6],
+            'line-opacity':['case', dim, 0.6, 1] } });
+  // Time-limited spots get an amber dashed outline, so a "free" spot that's only
+  // free for 30 min reads as limited on the map without a click.
+  map.addLayer({ id:'poly-limit', type:'line', source:'polys',
+    filter:['==', ['get','lim'], 1],
+    paint:{ 'line-color':'#c77d0a',
+            'line-width':['interpolate',['linear'],['zoom'], 10,1.5, 17,3, 19,4.5],
+            'line-dasharray':[2, 1.5] } });
   map.addLayer({ id:'pts', type:'circle', source:'pts',
-    paint:{ 'circle-radius':5, 'circle-color':COLOUR,
-            'circle-stroke-width':1, 'circle-stroke-color':'#fff' } });
+    paint:{ 'circle-radius':['interpolate',['linear'],['zoom'], 10,5, 13,9, 16,18, 19,30],
+            'circle-color':COLOUR,
+            'circle-opacity':['case', dim, 0.6, 1],
+            'circle-stroke-width':['interpolate',['linear'],['zoom'], 10,1.5, 16,3, 19,5],
+            'circle-stroke-color':['case', ['==', ['get','lim'], 1], '#c77d0a', '#fff'],
+            'circle-stroke-opacity':['case', dim, 0.7, 1] } });
 
   applyFilter();
   fitTo(els);
-  showSummary(data, polys.features.length, pts.features.length);
+  showSummary(data, computeStats(els), polys.features.length, pts.features.length);
+  buildLimitMarkers(els);
   enterMap();
+}
+
+// Counts are computed from what's actually shown (business parking already
+// removed), so the summary never disagrees with the map.
+function computeStats(els){
+  const tg = e => e.tags || {};
+  const total = els.length;
+  const withFee = els.filter(e => 'fee' in tg(e)).length;
+  return {
+    total,
+    free: els.filter(e => tg(e).fee === 'no').length,
+    paid: els.filter(e => tg(e).fee === 'yes').length,
+    park_ride: els.filter(e => isPR(tg(e))).length,
+    fee_pct: total ? Math.round(1000 * withFee / total) / 10 : 0
+  };
 }
 
 function fmtDate(s){
@@ -294,8 +362,55 @@ function fmtDate(s){
   return d.toLocaleDateString(undefined, { year:'numeric', month:'long', day:'numeric' });
 }
 
-function showSummary(data, nPoly, nPts){
-  const s = data.stats || {};
+// Compact max-stay label: "1 hour"→"1h", "30 minutes"→"30m", "90 minutes"→"1.5h".
+function shortDuration(ms){
+  if (!ms) return '';
+  const s = String(ms).toLowerCase().trim();
+  if (s === 'no' || s === 'unlimited') return '';
+  let mins = null, m;
+  if ((m = s.match(/^([\d.]+)\s*h/)))        mins = Math.round(parseFloat(m[1]) * 60);
+  else if ((m = s.match(/^([\d.]+)\s*min/))) mins = Math.round(parseFloat(m[1]));
+  else if ((m = s.match(/^(\d+)$/)))         mins = parseInt(m[1], 10);
+  if (mins == null || !isFinite(mins) || mins <= 0) return '';
+  if (mins % 60 === 0) return (mins / 60) + 'h';
+  if (mins < 60)       return mins + 'm';
+  return (mins / 60).toFixed(1).replace(/\.0$/, '') + 'h';
+}
+
+// Small duration tags ("2h") on time-limited spots. Only ~1% of parking carries
+// a maxstay, so these are few; HTML markers avoid needing map glyph fonts.
+function buildLimitMarkers(els){
+  limitMarkers.forEach(m => m.marker.remove());
+  limitMarkers = [];
+  for (const e of els){
+    const t = e.tags || {};
+    const ev = hasEV(t);
+    const lab = [shortDuration(t.maxstay), ev ? '⚡' : ''].filter(Boolean).join(' ');
+    if (!lab) continue;
+    const el = document.createElement('div');
+    el.className = 'limlabel';
+    el.textContent = lab;
+    const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+      .setLngLat([e.lon, e.lat]).addTo(map);
+    limitMarkers.push({ el, marker, cat: categoryOf(t), pr: isPR(t) ? 1 : 0, ev: ev ? 1 : 0 });
+  }
+  updateLimitMarkers();
+}
+
+// Keep the duration tags in sync with the Show checkboxes.
+function updateLimitMarkers(){
+  const on = [];
+  if ($('fFree').checked)    on.push('free');
+  if ($('fPaid').checked)    on.push('paid');
+  if ($('fUnknown').checked) on.push('unknown');
+  const fPR = $('fPR').checked, fEV = $('fEV').checked;
+  for (const m of limitMarkers){
+    const vis = on.includes(m.cat) || (fPR && m.pr === 1) || (fEV && m.ev === 1);
+    m.el.style.display = vis ? '' : 'none';
+  }
+}
+
+function showSummary(data, s, nPoly, nPts){
   const pct = s.fee_pct ?? 0;
   const unknown = (s.total ?? 0) - (s.free ?? 0) - (s.paid ?? 0);
   const when = fmtDate(data.generated || data.updated);
@@ -305,7 +420,7 @@ function showSummary(data, nPoly, nPts){
       <div class="row"><span>Parking places</span><b>${s.total ?? 0}</b></div>
       <div class="row"><span>Free (fee = no)</span><b style="color:var(--free)">${s.free ?? 0}</b></div>
       <div class="row"><span>Paid (fee = yes)</span><b style="color:var(--paid)">${s.paid ?? 0}</b></div>
-      <div class="row"><span>Fee not recorded</span><b style="color:var(--unknown)">${unknown}</b></div>
+      <div class="row"><span>Not recorded</span><b style="color:var(--unknown)">${unknown}</b></div>
       <div class="row"><span>Park &amp; ride</span><b style="color:var(--pr)">${s.park_ride ?? 0}</b></div>
       <div class="row"><span>With an outline</span><b>${nPoly} of ${nPoly + nPts}</b></div>
       <div class="warn">
@@ -313,6 +428,7 @@ function showSummary(data, nPoly, nPts){
         The remaining ${(100 - pct).toFixed(1)}% is not tagged either way — it is
         <em>unknown</em>, not free. Always check the signs before leaving the car.
       </div>
+      <div class="stamp">Customers-only business parking (e.g. shop &amp; gated garages) is hidden.</div>
       ${when ? `<div class="stamp">OpenStreetMap data · updated ${escapeHtml(when)}</div>`
              : `<div class="stamp">OpenStreetMap data</div>`}
     </div>`;
@@ -323,21 +439,47 @@ function escapeHtml(s){
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 }
 
+// Turn payment:* keys into readable app / method names.
+function prettyPay(csv){
+  const NAME = { easypark:'EasyPark', mycicero:'MyCicero', telepass:'Telepass',
+    tabnet:'Tabnet', dropticket:'DropTicket', sostaonline:'Sosta Online', app:'App',
+    credit_cards:'Cards', debit_cards:'Cards', cards:'Cards', cash:'Cash', coins:'Coins',
+    notes:'Notes', contactless:'Contactless', google_pay:'Google Pay', apple_pay:'Apple Pay' };
+  return csv.split(',').filter(Boolean).map(k => {
+    const key = k.toLowerCase();
+    return NAME[key] || key.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+  });
+}
+
 function popupHtml(p){
-  const label = p.cat === 'free' ? 'Free' : p.cat === 'paid' ? 'Paid' : 'Fee not recorded';
+  const label = p.cat === 'free' ? 'Free' : p.cat === 'paid' ? 'Paid' : 'Not recorded';
   const col   = p.cat === 'free' ? 'var(--free)' : p.cat === 'paid' ? 'var(--paid)' : 'var(--unknown)';
   const bits = [];
-  if (p.charge)   bits.push(`Charge: ${escapeHtml(p.charge)}`);
-  if (p.cond)     bits.push(`Conditional: ${escapeHtml(p.cond)}`);
+  if (p.charge)   bits.push(`Rate: ${escapeHtml(p.charge)}`);
+  if (p.cond)     bits.push(`Free when: ${escapeHtml(p.cond)}`);
+  if (p.hours)    bits.push(`Hours: ${escapeHtml(p.hours)}`);
+  if (p.pay){
+    const apps = [...new Set(prettyPay(p.pay))];
+    if (apps.length) bits.push(`Pay with: ${escapeHtml(apps.join(', '))}`);
+  }
+  const tl = p.maxstay && String(p.maxstay).toLowerCase() !== 'no';
+  if (p.operator) bits.push(`Operator: ${escapeHtml(p.operator)}`);
+  if (p.ev)       bits.push(`⚡ EV charging${p.chg ? ' — ' + escapeHtml(p.chg) + ' bays' : ''}`);
   if (p.capacity) bits.push(`${escapeHtml(p.capacity)} spaces`);
   if (p.parking)  bits.push(escapeHtml(p.parking).replace(/_/g,' '));
-  if (p.maxstay)  bits.push(`Max stay ${escapeHtml(p.maxstay)}`);
-  if (p.access)   bits.push(`Access: ${escapeHtml(p.access)}`);
+  if (p.access && p.access !== 'yes') bits.push(`Access: ${escapeHtml(p.access)}`);
   if (p.km != null) bits.push(`${p.km} km from centre`);
+  const hasLoc = p.lat != null && p.lon != null;
+  const coords = hasLoc ? `${(+p.lat).toFixed(5)}, ${(+p.lon).toFixed(5)}` : '';
+  const gmaps  = hasLoc ? `https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}` : '';
   return `<h3>${escapeHtml(p.name || 'Unnamed parking')}</h3>
     <span class="pill" style="background:${col}">${label}</span>
     ${p.pr ? '<span class="pill" style="background:var(--pr);margin-left:4px">Park &amp; ride</span>' : ''}
-    <div class="t" style="margin-top:6px">${bits.join('<br>') || 'No further detail in OpenStreetMap'}</div>`;
+    ${tl ? `<div class="timelimit">⏱ Time-limited — max ${escapeHtml(p.maxstay)}.<br>Set your parking disc / dashboard clock, or risk a fine.</div>` : ''}
+    <div class="t" style="margin-top:6px">${bits.join('<br>') || 'No further detail in OpenStreetMap'}</div>
+    ${p.cat === 'unknown' ? `<div class="caution">OpenStreetMap doesn't record who may park here — it could be public, private or residents-only. Always check the signs.</div>` : ''}
+    ${hasLoc ? `<div class="t" style="margin-top:6px">📍 ${coords}<br>
+      <a href="${gmaps}" target="_blank" rel="noopener">Open in Google Maps ↗</a></div>` : ''}`;
 }
 
 for (const layer of ['poly-fill','pts']){
@@ -348,7 +490,7 @@ for (const layer of ['poly-fill','pts']){
   map.on('mouseenter', layer, () => map.getCanvas().style.cursor = 'pointer');
   map.on('mouseleave', layer, () => map.getCanvas().style.cursor = '');
 }
-['fFree','fPaid','fUnknown','fPR'].forEach(id => $(id).addEventListener('change', applyFilter));
+['fFree','fPaid','fUnknown','fPR','fEV'].forEach(id => $(id).addEventListener('change', applyFilter));
 
 /* ---------------- view switching ---------------- */
 function enterMap(){ $('start').style.display = 'none'; map.resize(); }
@@ -363,6 +505,7 @@ async function loadCityFile(city){
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     render(data);
+    loadChargers(city);
     setGeoNote('');
   } catch (err){
     setGeoNote('');
@@ -375,6 +518,108 @@ async function loadCityFile(city){
           `    python -m http.server\n\n` +
           `then open http://localhost:8000  — or just deploy it.`);
   }
+}
+
+/* ---------------- EV chargers (Open Charge Map) ---------------- */
+function clearChargers(){
+  chargerMarkers.forEach(m => m.marker.remove());
+  chargerMarkers = [];
+}
+
+// Load the prepared charger layer for a city (chargers/<slug>.json). Optional —
+// if there's no file, the app just carries on with OSM parking data.
+async function loadChargers(city){
+  clearChargers();
+  const path = city.chargers || (city.file ? city.file.replace(/^cities\//, 'chargers/') : null);
+  if (!path) return;
+  try {
+    const res = await fetch(path, { cache: 'no-store' });
+    if (!res.ok) return;
+    const cj = await res.json();
+    renderChargers(cj.chargers || []);
+  } catch (e){ /* no charger layer available */ }
+}
+
+// Chargers use the same ⚡ symbol as the parking-derived EV layer, so the EV
+// experience is one consistent thing rather than dots plus badges.
+function renderChargers(list){
+  clearChargers();
+  for (const c of list){
+    if (c.lon == null || c.lat == null) continue;
+    const el = document.createElement('div');
+    el.className = 'limlabel evmark';
+    el.textContent = '⚡';
+    el.style.display = $('fEV').checked ? '' : 'none';
+    el.addEventListener('click', ev => {
+      ev.stopPropagation();
+      new maplibregl.Popup({ closeButton:true })
+        .setLngLat([c.lon, c.lat])
+        .setHTML(chargerPopup({ name:c.name, operator:c.operator, kw:c.kw, points:c.points,
+                                cost:c.cost, usage:c.usage, membership:c.membership,
+                                lon:c.lon, lat:c.lat }))
+        .addTo(map);
+    });
+    const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+      .setLngLat([c.lon, c.lat]).addTo(map);
+    chargerMarkers.push({ el, marker });
+  }
+}
+
+function updateChargerMarkers(){
+  const show = $('fEV').checked;
+  for (const m of chargerMarkers) m.el.style.display = show ? '' : 'none';
+}
+
+// Is a point inside a mapped car park? ring is [[lat,lon],...]
+function pointInRing(lon, lat, ring){
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++){
+    const yi = ring[i][0], xi = ring[i][1], yj = ring[j][0], xj = ring[j][1];
+    if (((yi > lat) !== (yj > lat)) && (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+
+// Tags of the car park a charger sits in (or nearest within ~50 m), from OSM.
+function parkingContext(lon, lat){
+  if (!DATA || lon == null || lat == null) return null;
+  const els = DATA.elements || [];
+  for (const e of els){
+    if (e.ring && e.ring.length > 3 && pointInRing(+lon, +lat, e.ring)) return e.tags || {};
+  }
+  let best = null, bestKm = Infinity;
+  for (const e of els){
+    const d = haversineKm(+lat, +lon, e.lat, e.lon);
+    if (d < bestKm){ bestKm = d; best = e; }
+  }
+  return (best && bestKm <= 0.05) ? (best.tags || {}) : null;
+}
+
+// "Do I also pay for parking?" — answered from the OSM parking under the charger.
+function parkingNote(lon, lat){
+  const t = parkingContext(lon, lat);
+  const ms = (t && t.maxstay && String(t.maxstay).toLowerCase() !== 'no') ? ` · max stay ${escapeHtml(t.maxstay)}` : '';
+  if (!t) return 'Parking fee here isn’t recorded — check the signs.';
+  if ((t.access || '') === 'customers') return 'Sits in a customers-only car park — check you’re allowed.';
+  if (t.fee === 'no')  return `Parking here is <b>free</b>${ms} — but you may still pay to charge.`;
+  if (t.fee === 'yes') return `Parking here is <b>paid</b>${ms} — you pay for the parking on top of charging.`;
+  return `Parking fee here isn’t recorded${ms} — check the signs.`;
+}
+
+function chargerPopup(p){
+  const bits = [];
+  if (p.operator) bits.push(`Operator: ${escapeHtml(String(p.operator))}`);
+  const spec = [];
+  if (p.kw)     spec.push(`${escapeHtml(String(p.kw))} kW`);
+  if (p.points) spec.push(`${escapeHtml(String(p.points))} points`);
+  if (spec.length) bits.push(spec.join(' · '));
+  bits.push(`Charging: ${p.cost ? escapeHtml(String(p.cost)) : 'cost not listed on Open Charge Map'}`);
+  if (p.usage)      bits.push(escapeHtml(String(p.usage)));
+  if (p.membership) bits.push('Membership / app may be required');
+  return `<h3>⚡ ${escapeHtml(p.name || 'Charging station')}</h3>
+    <div class="t" style="margin-top:6px">${bits.join('<br>')}</div>
+    <div class="caution" style="margin-top:8px">${parkingNote(p.lon, p.lat)}</div>
+    <div class="t" style="margin-top:6px">Charger: Open Charge Map · parking: OpenStreetMap</div>`;
 }
 
 function loadDropped(file){
@@ -444,19 +689,45 @@ function locateOnMap(){
 }
 
 /* ---------------- start screen wiring ---------------- */
-function buildCityList(){
-  $('cityList').innerHTML = '';
-  for (const c of CITIES){
+function buildCityList(filter){
+  const q = (filter || '').trim().toLowerCase();
+  const matches = q ? CITIES.filter(c => (c.name || '').toLowerCase().includes(q)) : CITIES;
+  const shown = matches.slice(0, 60);          // cap the DOM for big manifests
+  const box = $('cityList');
+  box.innerHTML = '';
+  for (const c of shown){
     const b = document.createElement('button');
     b.className = 'city';
     b.innerHTML =
       `<span><span class="nm">${escapeHtml(c.name)}</span> <span class="cc">${escapeHtml(c.country||'')}</span></span>` +
-      `<span class="meta">${c.total ? c.total.toLocaleString() + ' spots · ' + c.fee_pct + '% fee info' : ''}</span>`;
+      `<span class="meta">${c.total ? Number(c.total).toLocaleString() + ' spots · ' + c.fee_pct + '% fee info' : ''}</span>`;
     b.addEventListener('click', () => loadCityFile(c));
-    $('cityList').appendChild(b);
+    box.appendChild(b);
+  }
+  if (!matches.length){
+    const d = document.createElement('div'); d.className = 'city-more';
+    d.textContent = 'No city matches — try another name.'; box.appendChild(d);
+  } else if (matches.length > shown.length){
+    const d = document.createElement('div'); d.className = 'city-more';
+    d.textContent = `…and ${matches.length - shown.length} more — keep typing to narrow down.`;
+    box.appendChild(d);
   }
 }
-buildCityList();
+
+// Load the built city list; fall back to DEFAULT_CITIES if there's no manifest.
+async function loadManifest(){
+  try {
+    const res = await fetch('cities.json', { cache: 'no-store' });
+    if (res.ok){
+      const list = await res.json();
+      if (Array.isArray(list) && list.length) CITIES = list;
+    }
+  } catch (e){ /* no cities.json yet — keep DEFAULT_CITIES */ }
+  buildCityList('');
+}
+
+$('citySearch').addEventListener('input', e => buildCityList(e.target.value));
+loadManifest();
 
 $('openFile').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', e => { if (e.target.files[0]) loadDropped(e.target.files[0]); });
