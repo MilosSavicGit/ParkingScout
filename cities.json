@@ -1,0 +1,22 @@
+[
+  {
+    "name": "Rome",
+    "country": "Italy",
+    "file": "cities/rome-41485.json",
+    "lat": 41.89332,
+    "lon": 12.482932,
+    "total": 5455,
+    "fee_pct": 29.7,
+    "generated": "2026-08-07"
+  },
+  {
+    "name": "Copenhagen",
+    "country": "Denmark",
+    "file": "cities/copenhagen-2192363.json",
+    "lat": 55.663304,
+    "lon": 12.603205,
+    "total": 2470,
+    "fee_pct": 25.3,
+    "generated": null
+  }
+]

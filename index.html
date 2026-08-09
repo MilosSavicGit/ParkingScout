@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>ParkingScout — find the free parking</title>
+
+<!-- Same map engine BeachScout uses. Raster tiles from OpenStreetMap need no
+     API key, which keeps the whole app a static site with no build step. The
+     app never calls Overpass at runtime: it loads a prepared cities/<slug>.json
+     that parking_probe.py wrote. Refresh the data by re-running the probe every
+     few months and redeploying — the app itself stays a plain file server. -->
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+
+<style>
+  :root{
+    --ink:#1c1a17; --paper:#f4efe6; --panel:#fffdf8; --rule:#d8cfbe;
+    --accent:#b5471f; --muted:#8a7f6d;
+    --free:#2f6b4f;      /* pine green  — fee=no        */
+    --paid:#b8861b;      /* amber       — fee=yes       */
+    --unknown:#9aa0a6;   /* grey        — no fee tag    */
+    --pr:#2563eb;        /* blue        — park and ride */
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:Georgia,"Times New Roman",serif;color:var(--ink);background:var(--paper)}
+  button{font-family:inherit}
+
+  /* ---- app shell ---- */
+  .app{display:grid;grid-template-columns:340px 1fr;height:100dvh}
+  @media(max-width:820px){ .app{grid-template-columns:1fr;grid-template-rows:auto 1fr} }
+  .panel{background:var(--panel);border-right:1px solid var(--rule);padding:16px;overflow-y:auto}
+  #map{width:100%;height:100%}
+
+  h1{margin:0 0 2px;font-size:22px;letter-spacing:.2px}
+  .sub{color:var(--muted);font-style:italic;font-size:12px;margin-bottom:14px}
+
+  .backbtn{appearance:none;border:1px solid var(--rule);background:#fff;color:var(--ink);
+           border-radius:999px;padding:5px 12px;font-size:12px;cursor:pointer;margin-bottom:10px}
+  .backbtn:hover{border-color:var(--accent);color:var(--accent)}
+
+  .card{background:#fff;border:1px solid var(--rule);border-radius:12px;padding:12px;margin:12px 0}
+  .card h2{margin:0 0 8px;font-size:15px}
+  .row{display:flex;justify-content:space-between;font-size:13px;padding:3px 0}
+  .row b{font-weight:bold}
+  .stamp{font-size:11px;color:var(--muted);margin-top:6px}
+  .warn{background:#fffaf1;border:1px solid var(--rule);border-radius:10px;padding:10px;
+        font-size:12px;line-height:1.45;color:var(--muted);margin-top:10px}
+
+  .filters{display:grid;gap:6px;margin-top:6px}
+  .filters label{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}
+  .swatch{width:14px;height:14px;border-radius:3px;border:1px solid rgba(0,0,0,.25);flex:none}
+  .legend-note{font-size:11px;color:var(--muted);margin-top:8px;line-height:1.4}
+
+  .maplibregl-popup-content{font-family:Georgia,serif;font-size:13px;max-width:280px}
+  .maplibregl-popup-content h3{margin:0 0 6px;font-size:15px}
+  .maplibregl-popup-content .t{color:var(--muted);font-size:12px;line-height:1.5}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;color:#fff;font-size:11px;font-weight:bold}
+
+  /* locate control on the map */
+  .locate{appearance:none;border:none;background:#fff;width:29px;height:29px;cursor:pointer;
+          font-size:15px;line-height:29px;text-align:center}
+  .locate:hover{background:#f2ede3}
+
+  /* ---- start screen ---- */
+  #start{position:fixed;inset:0;z-index:20;background:var(--paper);overflow-y:auto;
+         display:flex;align-items:center;justify-content:center;padding:24px}
+  .start-inner{width:100%;max-width:460px}
+  .brand{font-size:34px;margin:0 0 4px}
+  .tagline{color:var(--muted);font-style:italic;font-size:15px;margin:0 0 20px}
+  .locate-cta{width:100%;appearance:none;border:none;border-radius:12px;background:var(--accent);
+              color:#fff;font-size:16px;padding:14px;cursor:pointer;margin-bottom:6px}
+  .locate-cta:hover{background:#9c3c19}
+  .locate-cta:disabled{opacity:.6;cursor:default}
+  .geo-note{font-size:12px;color:var(--muted);min-height:16px;margin:0 0 16px;text-align:center}
+  .city-h{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+          margin:0 0 8px;border-bottom:1px solid var(--rule);padding-bottom:6px}
+  .city{width:100%;text-align:left;appearance:none;background:#fff;border:1px solid var(--rule);
+        border-radius:12px;padding:12px 14px;margin-bottom:8px;cursor:pointer;
+        display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .city:hover{border-color:var(--accent)}
+  .city .nm{font-size:16px}
+  .city .cc{color:var(--muted);font-size:12px;font-style:italic}
+  .city .meta{color:var(--muted);font-size:12px;white-space:nowrap}
+  .foot{font-size:11px;color:var(--muted);line-height:1.5;margin-top:18px;border-top:1px solid var(--rule);padding-top:12px}
+  .foot a{color:var(--accent)}
+  .filelink{color:var(--accent);cursor:pointer;text-decoration:underline}
+  input[type=file]{display:none}
+  .drop.over{outline:2px dashed var(--accent);outline-offset:4px}
+</style>
+</head>
+<body>
+
+<!-- ============ START SCREEN ============ -->
+<div id="start" class="drop">
+  <div class="start-inner">
+    <h1 class="brand">ParkingScout</h1>
+    <p class="tagline">See a city's parking — and which of it is free.</p>
+
+    <button class="locate-cta" id="near">📍 Find parking near me</button>
+    <p class="geo-note" id="geoNote"></p>
+
+    <p class="city-h">Pick a city</p>
+    <div id="cityList"></div>
+
+    <p class="foot">
+      Data from <a href="https://www.openstreetmap.org/" target="_blank" rel="noopener">OpenStreetMap</a>,
+      prepared per city and refreshed periodically. We only show what the map records:
+      parking with no fee tag is shown as <em>unknown</em>, never assumed free —
+      always check the signs before you leave the car.
+      <br><br>
+      Got a prepared city file? <span class="filelink" id="openFile">Open a JSON</span>.
+      <input type="file" id="file" accept=".json" />
+    </p>
+  </div>
+</div>
+
+<!-- ============ MAP VIEW ============ -->
+<div class="app">
+  <div class="panel">
+    <button class="backbtn" id="back">← Cities</button>
+    <div id="summary"></div>
+
+    <div class="card">
+      <h2>Show</h2>
+      <div class="filters">
+        <label><input type="checkbox" id="fFree" checked>
+          <span class="swatch" style="background:var(--free)"></span> Free (fee = no)</label>
+        <label><input type="checkbox" id="fPaid">
+          <span class="swatch" style="background:var(--paid)"></span> Paid (fee = yes)</label>
+        <label><input type="checkbox" id="fUnknown">
+          <span class="swatch" style="background:var(--unknown)"></span> Fee not recorded</label>
+        <label><input type="checkbox" id="fPR">
+          <span class="swatch" style="background:var(--pr)"></span> Park &amp; ride only</label>
+      </div>
+      <div class="legend-note">
+        Outlines are the real mapped shape of each car park. Circles are entries
+        mapped as a single point rather than an area.
+      </div>
+    </div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script>
+/* =========================================================================
+   CITY MANIFEST
+   To add a city:
+     1. Run:  python parking_probe.py "Lisbon, Portugal" --save
+     2. Copy out/<slug>.json into  cities/
+     3. Add one line here with its centre (from the JSON's "centre") and stats.
+   `lat`/`lon` are only used to pick the nearest city for "near me".
+   ========================================================================= */
+const CITIES = [
+  { name:"Rome", country:"Italy", file:"cities/rome-41485.json",
+    lat:41.89332, lon:12.482932, total:5455, fee_pct:29.7 },
+];
+
+const $ = id => document.getElementById(id);
+let DATA = null, userMarker = null;
+
+/* If the map library didn't load (offline, or a network that blocks the CDN),
+   fail with a clear message instead of a dead screen. */
+if (typeof maplibregl === 'undefined'){
+  $('geoNote').textContent = 'Couldn’t load the map library — check your connection and reload.';
+  $('near').disabled = true;
+  $('cityList').style.display = 'none';
+  throw new Error('maplibre-gl failed to load');
+}
+
+/* ---------------- map ---------------- */
+const map = new maplibregl.Map({
+  container: 'map',
+  style: {
+    version: 8,
+    sources: { osm: {
+      type: 'raster',
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      attribution: '© OpenStreetMap contributors'
+    }},
+    layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+  },
+  center: [12.4829, 41.8933],
+  zoom: 10
+});
+map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+/* a small "locate me" button, added to the map's control stack */
+class LocateControl {
+  onAdd(m){ this._m = m;
+    this._c = document.createElement('div');
+    this._c.className = 'maplibregl-ctrl maplibregl-ctrl-group';
+    const b = document.createElement('button');
+    b.className = 'locate'; b.type = 'button'; b.title = 'Show my location';
+    b.innerHTML = '📍';
+    b.onclick = () => locateOnMap();
+    this._c.appendChild(b);
+    return this._c;
+  }
+  onRemove(){ this._c.remove(); this._m = undefined; }
+}
+map.addControl(new LocateControl(), 'top-right');
+
+/* ---------------- categorisation ---------------- */
+function isPR(t){ const v = String(t.park_ride ?? 'no').toLowerCase(); return v !== 'no' && v !== ''; }
+function categoryOf(t){ return t.fee === 'no' ? 'free' : t.fee === 'yes' ? 'paid' : 'unknown'; }
+
+/* Overpass rings are [lat, lon]; GeoJSON wants [lon, lat]. Getting this
+   backwards puts Rome in the Indian Ocean, which is at least obvious. */
+function toGeoJSON(elements){
+  const polys = { type:'FeatureCollection', features: [] };
+  const pts   = { type:'FeatureCollection', features: [] };
+  for (const el of elements){
+    const t = el.tags || {};
+    const props = {
+      cat: categoryOf(t), pr: isPR(t) ? 1 : 0,
+      name: t.name || '', fee: t.fee || '', charge: t.charge || '',
+      capacity: t.capacity || '', parking: t.parking || '',
+      maxstay: t.maxstay || '', access: t.access || '',
+      km: el.km ?? null, cond: t['fee:conditional'] || ''
+    };
+    if (el.ring && el.ring.length > 3){
+      polys.features.push({ type:'Feature', properties: props,
+        geometry:{ type:'Polygon', coordinates:[ el.ring.map(p => [p[1], p[0]]) ] } });
+    } else {
+      pts.features.push({ type:'Feature', properties: props,
+        geometry:{ type:'Point', coordinates:[el.lon, el.lat] } });
+    }
+  }
+  return { polys, pts };
+}
+
+const COLOUR = [
+  'case',
+  ['==', ['get','pr'], 1], '#2563eb',
+  ['==', ['get','cat'], 'free'], '#2f6b4f',
+  ['==', ['get','cat'], 'paid'], '#b8861b',
+  '#9aa0a6'
+];
+
+function currentFilter(){
+  const on = [];
+  if ($('fFree').checked)    on.push('free');
+  if ($('fPaid').checked)    on.push('paid');
+  if ($('fUnknown').checked) on.push('unknown');
+  const catFilter = on.length
+    ? ['in', ['get','cat'], ['literal', on]]
+    : ['==', ['get','cat'], '___none___'];
+  return $('fPR').checked ? ['all', ['==', ['get','pr'], 1], catFilter] : catFilter;
+}
+function applyFilter(){
+  if (!map.getLayer('poly-fill')) return;
+  const f = currentFilter();
+  ['poly-fill','poly-line','pts'].forEach(l => map.setFilter(l, f));
+}
+
+function fitTo(elements){
+  const lats = elements.map(e => e.lat), lons = elements.map(e => e.lon);
+  if (!lats.length) return;
+  map.fitBounds([[Math.min(...lons), Math.min(...lats)],
+                 [Math.max(...lons), Math.max(...lats)]], { padding: 40, maxZoom: 14 });
+}
+
+/* ---------------- render a loaded city ---------------- */
+function render(data){
+  DATA = data;
+  const els = data.elements || [];
+  const { polys, pts } = toGeoJSON(els);
+
+  for (const id of ['poly-fill','poly-line','pts'])  if (map.getLayer(id))  map.removeLayer(id);
+  for (const id of ['polys','pts'])                  if (map.getSource(id)) map.removeSource(id);
+
+  map.addSource('polys', { type:'geojson', data: polys });
+  map.addSource('pts',   { type:'geojson', data: pts });
+  map.addLayer({ id:'poly-fill', type:'fill', source:'polys',
+    paint:{ 'fill-color': COLOUR, 'fill-opacity':0.45 } });
+  map.addLayer({ id:'poly-line', type:'line', source:'polys',
+    paint:{ 'line-color': COLOUR, 'line-width':1.5 } });
+  map.addLayer({ id:'pts', type:'circle', source:'pts',
+    paint:{ 'circle-radius':5, 'circle-color':COLOUR,
+            'circle-stroke-width':1, 'circle-stroke-color':'#fff' } });
+
+  applyFilter();
+  fitTo(els);
+  showSummary(data, polys.features.length, pts.features.length);
+  enterMap();
+}
+
+function fmtDate(s){
+  if (!s) return '';
+  const d = new Date(s);
+  if (isNaN(d)) return String(s);
+  return d.toLocaleDateString(undefined, { year:'numeric', month:'long', day:'numeric' });
+}
+
+function showSummary(data, nPoly, nPts){
+  const s = data.stats || {};
+  const pct = s.fee_pct ?? 0;
+  const unknown = (s.total ?? 0) - (s.free ?? 0) - (s.paid ?? 0);
+  const when = fmtDate(data.generated || data.updated);
+  $('summary').innerHTML = `
+    <div class="card">
+      <h2>${escapeHtml(data.city || 'City')}</h2>
+      <div class="row"><span>Parking places</span><b>${s.total ?? 0}</b></div>
+      <div class="row"><span>Free (fee = no)</span><b style="color:var(--free)">${s.free ?? 0}</b></div>
+      <div class="row"><span>Paid (fee = yes)</span><b style="color:var(--paid)">${s.paid ?? 0}</b></div>
+      <div class="row"><span>Fee not recorded</span><b style="color:var(--unknown)">${unknown}</b></div>
+      <div class="row"><span>Park &amp; ride</span><b style="color:var(--pr)">${s.park_ride ?? 0}</b></div>
+      <div class="row"><span>With an outline</span><b>${nPoly} of ${nPoly + nPts}</b></div>
+      <div class="warn">
+        Fee information exists for <b>${pct}%</b> of parking here.
+        The remaining ${(100 - pct).toFixed(1)}% is not tagged either way — it is
+        <em>unknown</em>, not free. Always check the signs before leaving the car.
+      </div>
+      ${when ? `<div class="stamp">OpenStreetMap data · updated ${escapeHtml(when)}</div>`
+             : `<div class="stamp">OpenStreetMap data</div>`}
+    </div>`;
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+
+function popupHtml(p){
+  const label = p.cat === 'free' ? 'Free' : p.cat === 'paid' ? 'Paid' : 'Fee not recorded';
+  const col   = p.cat === 'free' ? 'var(--free)' : p.cat === 'paid' ? 'var(--paid)' : 'var(--unknown)';
+  const bits = [];
+  if (p.charge)   bits.push(`Charge: ${escapeHtml(p.charge)}`);
+  if (p.cond)     bits.push(`Conditional: ${escapeHtml(p.cond)}`);
+  if (p.capacity) bits.push(`${escapeHtml(p.capacity)} spaces`);
+  if (p.parking)  bits.push(escapeHtml(p.parking).replace(/_/g,' '));
+  if (p.maxstay)  bits.push(`Max stay ${escapeHtml(p.maxstay)}`);
+  if (p.access)   bits.push(`Access: ${escapeHtml(p.access)}`);
+  if (p.km != null) bits.push(`${p.km} km from centre`);
+  return `<h3>${escapeHtml(p.name || 'Unnamed parking')}</h3>
+    <span class="pill" style="background:${col}">${label}</span>
+    ${p.pr ? '<span class="pill" style="background:var(--pr);margin-left:4px">Park &amp; ride</span>' : ''}
+    <div class="t" style="margin-top:6px">${bits.join('<br>') || 'No further detail in OpenStreetMap'}</div>`;
+}
+
+for (const layer of ['poly-fill','pts']){
+  map.on('click', layer, e => {
+    new maplibregl.Popup({ closeButton:true })
+      .setLngLat(e.lngLat).setHTML(popupHtml(e.features[0].properties)).addTo(map);
+  });
+  map.on('mouseenter', layer, () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', layer, () => map.getCanvas().style.cursor = '');
+}
+['fFree','fPaid','fUnknown','fPR'].forEach(id => $(id).addEventListener('change', applyFilter));
+
+/* ---------------- view switching ---------------- */
+function enterMap(){ $('start').style.display = 'none'; map.resize(); }
+function enterStart(){ $('start').style.display = 'flex'; }
+$('back').addEventListener('click', enterStart);
+
+/* ---------------- loading a city ---------------- */
+async function loadCityFile(city){
+  setGeoNote(`Loading ${city.name}…`);
+  try {
+    const res = await fetch(city.file);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    render(data);
+    setGeoNote('');
+  } catch (err){
+    setGeoNote('');
+    // Most common cause: opened straight from disk (file://), where browsers
+    // block fetch. Serve the folder (or deploy it) and it works.
+    alert(`Could not load ${city.name}.\n\n` +
+          `${err.message}\n\n` +
+          `If you opened index.html directly from your computer, browsers block ` +
+          `loading local files. Serve the folder instead, e.g.:\n\n` +
+          `    python -m http.server\n\n` +
+          `then open http://localhost:8000  — or just deploy it.`);
+  }
+}
+
+function loadDropped(file){
+  const r = new FileReader();
+  r.onload = () => {
+    try { render(JSON.parse(r.result)); }
+    catch (err){ alert('Could not read that file: ' + err.message); }
+  };
+  r.readAsText(file);
+}
+
+/* ---------------- geolocation ---------------- */
+function haversineKm(a1,o1,a2,o2){
+  const R=6371, r=Math.PI/180;
+  const dp=(a2-a1)*r, dl=(o2-o1)*r;
+  const x=Math.sin(dp/2)**2 + Math.cos(a1*r)*Math.cos(a2*r)*Math.sin(dl/2)**2;
+  return 2*R*Math.asin(Math.sqrt(x));
+}
+function nearestCity(lat,lon){
+  let best=null, bestKm=Infinity;
+  for (const c of CITIES){
+    const km = haversineKm(lat,lon,c.lat,c.lon);
+    if (km < bestKm){ bestKm=km; best=c; }
+  }
+  return { city:best, km:bestKm };
+}
+function setGeoNote(t){ $('geoNote').textContent = t; }
+
+function placeUserMarker(lat,lon){
+  if (userMarker) userMarker.remove();
+  const el = document.createElement('div');
+  el.style.cssText = 'width:16px;height:16px;border-radius:50%;background:#1d6fe0;' +
+                     'border:3px solid #fff;box-shadow:0 0 0 2px rgba(29,111,224,.4)';
+  userMarker = new maplibregl.Marker({ element: el }).setLngLat([lon,lat]).addTo(map);
+}
+
+// From the start screen: find your city, load it, then fly to you.
+$('near').addEventListener('click', () => {
+  if (!navigator.geolocation){ setGeoNote('Location is not available in this browser.'); return; }
+  const btn = $('near'); btn.disabled = true;
+  setGeoNote('Finding your location…');
+  navigator.geolocation.getCurrentPosition(async pos => {
+    const { latitude:lat, longitude:lon } = pos.coords;
+    const { city, km } = nearestCity(lat, lon);
+    if (!city){ setGeoNote('No cities are loaded yet.'); btn.disabled=false; return; }
+    if (km > 60){
+      setGeoNote(`Nearest city we have is ${city.name}, ${km.toFixed(0)} km away — loading it.`);
+    }
+    await loadCityFile(city);
+    placeUserMarker(lat, lon);
+    map.flyTo({ center:[lon,lat], zoom:15 });
+    btn.disabled = false;
+  }, err => {
+    setGeoNote(err.code === 1 ? 'Location permission denied.' : 'Could not get your location.');
+    btn.disabled = false;
+  }, { enableHighAccuracy:true, timeout:10000, maximumAge:60000 });
+});
+
+// From the map: just show where I am (city already loaded).
+function locateOnMap(){
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(pos => {
+    const { latitude:lat, longitude:lon } = pos.coords;
+    placeUserMarker(lat, lon);
+    map.flyTo({ center:[lon,lat], zoom:15 });
+  }, () => {}, { enableHighAccuracy:true, timeout:10000, maximumAge:60000 });
+}
+
+/* ---------------- start screen wiring ---------------- */
+function buildCityList(){
+  $('cityList').innerHTML = '';
+  for (const c of CITIES){
+    const b = document.createElement('button');
+    b.className = 'city';
+    b.innerHTML =
+      `<span><span class="nm">${escapeHtml(c.name)}</span> <span class="cc">${escapeHtml(c.country||'')}</span></span>` +
+      `<span class="meta">${c.total ? c.total.toLocaleString() + ' spots · ' + c.fee_pct + '% fee info' : ''}</span>`;
+    b.addEventListener('click', () => loadCityFile(c));
+    $('cityList').appendChild(b);
+  }
+}
+buildCityList();
+
+$('openFile').addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', e => { if (e.target.files[0]) loadDropped(e.target.files[0]); });
+
+// drag a JSON anywhere onto the start screen
+const start = $('start');
+['dragenter','dragover'].forEach(ev => start.addEventListener(ev, e => {
+  e.preventDefault(); start.classList.add('over');
+}));
+['dragleave','drop'].forEach(ev => start.addEventListener(ev, e => {
+  e.preventDefault(); start.classList.remove('over');
+}));
+start.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) loadDropped(f);
+});
+</script>
+</body>
+</html>
