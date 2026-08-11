@@ -107,9 +107,10 @@
   .city .nm{font-size:16px}
   .city .cc{color:var(--muted);font-size:12px;font-style:italic}
   .city .meta{color:var(--muted);font-size:12px;white-space:nowrap}
-  .city-search{width:100%;appearance:none;border:1px solid var(--rule);border-radius:10px;
-    padding:10px 12px;margin-bottom:8px;font-family:inherit;font-size:14px;background:#fff;color:var(--ink)}
-  .city-search:focus{outline:none;border-color:var(--accent)}
+  /* 16px keeps iOS Safari from zooming when the field is focused */
+  .city-search,.country-sel{width:100%;appearance:none;border:1px solid var(--rule);border-radius:10px;
+    padding:10px 12px;margin-bottom:8px;font-family:inherit;font-size:16px;background:#fff;color:var(--ink)}
+  .city-search:focus,.country-sel:focus{outline:none;border-color:var(--accent)}
   .city-more{font-size:12px;color:var(--muted);text-align:center;padding:8px}
   .foot{font-size:11px;color:var(--muted);line-height:1.5;margin-top:18px;border-top:1px solid var(--rule);padding-top:12px}
   .foot a{color:var(--accent)}
@@ -129,7 +130,10 @@
     <button class="locate-cta" id="near">📍 Find parking near me</button>
     <p class="geo-note" id="geoNote"></p>
 
-    <p class="city-h">Pick a city</p>
+    <p class="city-h">Choose a country</p>
+    <select id="countrySelect" class="country-sel"></select>
+
+    <p class="city-h" style="margin-top:12px">Pick a city</p>
     <input id="citySearch" class="city-search" placeholder="Search city…" autocomplete="off" />
     <div id="cityList"></div>
 
@@ -687,6 +691,7 @@ $('near').addEventListener('click', () => {
   setGeoNote('Finding your location…');
   navigator.geolocation.getCurrentPosition(async pos => {
     const { latitude:lat, longitude:lon } = pos.coords;
+    userLoc = { lat, lon };
     const { city, km } = nearestCity(lat, lon);
     if (!city){ setGeoNote('No cities are loaded yet.'); btn.disabled=false; return; }
     if (km > 60){
@@ -713,17 +718,111 @@ function locateOnMap(){
 }
 
 /* ---------------- start screen wiring ---------------- */
+// Fold to lowercase ASCII so "forli" matches "Forlì", "citta" matches "Città", etc.
+function norm(s){ return (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+let selectedCountry = null;   // country-first: the search is scoped to this country
+let userLoc = null;           // set once geolocation succeeds — used to break same-name ties by nearest
+function kmBetween(a1,o1,a2,o2){ const R=6371,r=Math.PI/180,
+  dLa=(a2-a1)*r,dLo=(o2-o1)*r,s=Math.sin(dLa/2)**2+Math.cos(a1*r)*Math.cos(a2*r)*Math.sin(dLo/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s)); }
+
+// Build the country dropdown from whatever's actually in the manifest (so we never offer a
+// country with no data). Biggest first by number of cities, then alphabetical.
+function populateCountries(){
+  const counts = {};
+  for (const c of CITIES){ const k = c.country || 'Other'; counts[k] = (counts[k] || 0) + 1; }
+  const countries = Object.keys(counts).sort((a, b) => counts[b] - counts[a] || a.localeCompare(b));
+  const sel = $('countrySelect');
+  sel.innerHTML = '';
+  for (const name of countries){
+    const o = document.createElement('option');
+    o.value = name; o.textContent = `${name} (${counts[name].toLocaleString()})`;
+    sel.appendChild(o);
+  }
+  selectedCountry = countries[0] || null;       // default to the country with the most cities
+  if (selectedCountry) sel.value = selectedCountry;
+}
+
+// Capped Levenshtein distance — returns the edit distance, or cap+1 (pruned) once it exceeds cap.
+// Lets a misspelling like "Miano" still offer "Milano", "Napoly" → "Napoli", etc.
+function editWithin(a, b, cap){
+  const la = a.length, lb = b.length;
+  if (Math.abs(la - lb) > cap) return cap + 1;
+  let prev = Array.from({ length: lb + 1 }, (_, i) => i);
+  for (let i = 1; i <= la; i++){
+    const cur = [i]; let rowBest = cur[0];
+    for (let j = 1; j <= lb; j++){
+      const cost = a[i-1] === b[j-1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + cost);
+      if (cur[j] < rowBest) rowBest = cur[j];
+    }
+    if (rowBest > cap) return cap + 1;           // whole row already past the cap — stop early
+    prev = cur;
+  }
+  return prev[lb];
+}
+
+/* Disambiguation index, recomputed per country:
+   - dupKeys: name+region combos that appear more than once — region alone can't tell them apart.
+   - bigTowns: the ~30 largest places in the country (by population, or parking count as a proxy),
+     used as recognisable anchors. For a duplicated small town we label it "near <nearest big town>". */
+let dupKeys = new Set(), bigTowns = [];
+const cityKey = c => norm(c.name) + '|' + (c.region || '');
+function indexCountry(){
+  const pool = selectedCountry ? CITIES.filter(c => (c.country || 'Other') === selectedCountry) : CITIES;
+  const counts = {};
+  for (const c of pool){ const k = cityKey(c); counts[k] = (counts[k] || 0) + 1; }
+  dupKeys = new Set(Object.keys(counts).filter(k => counts[k] > 1));
+  const size = c => (c.pop || c.total || 0);
+  bigTowns = pool.filter(c => c.lat != null && c.lon != null).sort((a, b) => size(b) - size(a)).slice(0, 30);
+}
+function nearestBigTown(c){
+  if (c.lat == null || c.lon == null) return null;
+  const cn = norm(c.name); let best = null, bd = Infinity;
+  for (const b of bigTowns){
+    if (b === c || norm(b.name) === cn) continue;      // don't anchor a town to itself/its namesake
+    const d = kmBetween(c.lat, c.lon, b.lat, b.lon);
+    if (d < bd){ bd = d; best = b; }
+  }
+  return best ? best.name : null;
+}
+
 function buildCityList(filter){
-  const q = (filter || '').trim().toLowerCase();
-  const matches = q ? CITIES.filter(c => (c.name || '').toLowerCase().includes(q)) : CITIES;
+  const q = norm(filter.trim());
+  const pool = selectedCountry ? CITIES.filter(c => (c.country || 'Other') === selectedCountry) : CITIES;
+  let matches;
+  if (!q){
+    matches = pool.slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  } else {
+    const maxEdits = q.length <= 3 ? 1 : 2;      // stricter for very short queries
+    matches = pool.map(c => {
+      const n = norm(c.name);
+      const idx = n.indexOf(q);
+      if (idx >= 0) return { c, tier:0, score:idx };            // substring — best
+      let best = editWithin(q, n, maxEdits);                    // typo against whole name…
+      for (const w of n.split(/[\s'’\-]+/)) { const d = editWithin(q, w, maxEdits); if (d < best) best = d; }  // …or any word
+      return best <= maxEdits ? { c, tier:1, score:best } : null;
+    }).filter(Boolean)
+      .sort((a, b) => a.tier - b.tier || a.score - b.score || (a.c.name||'').length - (b.c.name||'').length)
+      .map(x => x.c);
+  }
   const shown = matches.slice(0, 60);          // cap the DOM for big manifests
   const box = $('cityList');
   box.innerHTML = '';
   for (const c of shown){
     const b = document.createElement('button');
     b.className = 'city';
+    // region tells same names apart across regions; for a clash *within* a region, add the
+    // nearest big town ("San Martino · Lombardia · near Pavia"). Country is already chosen.
+    const parts = [];
+    if (c.region) parts.push(escapeHtml(c.region));
+    else if (!selectedCountry && c.country) parts.push(escapeHtml(c.country));
+    if (dupKeys.has(cityKey(c))){ const nb = nearestBigTown(c); if (nb) parts.push('near ' + escapeHtml(nb)); }
+    const sub = parts.join(' · ');
+    // province code (the "(PV)" sigla) right after the name — the canonical Italian tag
+    const code = c.prov_code ? ` <span class="cc">(${escapeHtml(c.prov_code)})</span>` : '';
     b.innerHTML =
-      `<span><span class="nm">${escapeHtml(c.name)}</span> <span class="cc">${escapeHtml(c.country||'')}</span></span>` +
+      `<span><span class="nm">${escapeHtml(c.name)}</span>${code}${sub ? ` <span class="cc">${escapeHtml(sub)}</span>` : ''}</span>` +
       `<span class="meta">${c.total ? Number(c.total).toLocaleString() + ' spots · ' + c.fee_pct + '% fee info' : ''}</span>`;
     b.addEventListener('click', () => loadCityFile(c));
     box.appendChild(b);
@@ -747,8 +846,16 @@ async function loadManifest(){
       if (Array.isArray(list) && list.length) CITIES = list;
     }
   } catch (e){ /* no cities.json yet — keep DEFAULT_CITIES */ }
+  populateCountries();
+  indexCountry();
   buildCityList('');
 }
+$('countrySelect').addEventListener('change', e => {
+  selectedCountry = e.target.value;
+  $('citySearch').value = '';
+  indexCountry();
+  buildCityList('');
+});
 
 $('citySearch').addEventListener('input', e => buildCityList(e.target.value));
 loadManifest();
