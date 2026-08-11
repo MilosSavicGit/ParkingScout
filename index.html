@@ -104,6 +104,8 @@
         border-radius:12px;padding:12px 14px;margin-bottom:8px;cursor:pointer;
         display:flex;justify-content:space-between;align-items:baseline;gap:10px}
   .city:hover{border-color:var(--accent)}
+  .city.active{border-color:var(--accent);background:#eef6f0}   /* keyboard-highlighted suggestion */
+  #cityList{margin-top:8px;max-height:52vh;overflow-y:auto}      /* dropdown of suggestions, scrolls */
   .city .nm{font-size:16px}
   .city .cc{color:var(--muted);font-size:12px;font-style:italic}
   .city .meta{color:var(--muted);font-size:12px;white-space:nowrap}
@@ -133,8 +135,8 @@
     <p class="city-h">Choose a country</p>
     <select id="countrySelect" class="country-sel"></select>
 
-    <p class="city-h" style="margin-top:12px">Pick a city</p>
-    <input id="citySearch" class="city-search" placeholder="Search city…" autocomplete="off" />
+    <p class="city-h" style="margin-top:12px">Search a town</p>
+    <input id="citySearch" class="city-search" placeholder="Type a town name…" autocomplete="off" />
     <div id="cityList"></div>
 
     <p class="foot">
@@ -554,18 +556,53 @@ function clearChargers(){
   chargerMarkers = [];
 }
 
-// Load the prepared charger layer for a city (chargers/<slug>.json). Optional —
-// if there's no file, the app just carries on with OSM parking data.
+// Country → ISO code for the country-wide EV file (ev/<cc>.json). Extend as countries are added.
+const COUNTRY_CC = { italy: 'it', denmark: 'dk' };
+
+// Bounding box of the loaded city's parking (padded), so we can pull just the chargers near it
+// out of a country-wide EV file. Returns [minlat, minlon, maxlat, maxlon] or null.
+function cityBBox(pad){
+  pad = pad || 0.03;
+  const els = (DATA && DATA.elements) || [];
+  const lats = [], lons = [];
+  for (const e of els){
+    const la = e.lat != null ? e.lat : (e.center && e.center.lat);
+    const lo = e.lon != null ? e.lon : (e.center && e.center.lon);
+    if (la != null && lo != null){ lats.push(la); lons.push(lo); }
+  }
+  if (!lats.length){ const c = (DATA && DATA.centre) || {}; if (c.lat != null){ lats.push(c.lat); lons.push(c.lon); } }
+  if (!lats.length) return null;
+  return [Math.min(...lats) - pad, Math.min(...lons) - pad, Math.max(...lats) + pad, Math.max(...lons) + pad];
+}
+
+// Load the EV charger layer for a city. First a prepared per-city file (chargers/<slug>.json);
+// if there isn't one, fall back to the country-wide file (ev/<cc>.json, the same data
+// EVchargeScout uses) filtered to this city's area. Optional either way — no file, no chargers.
 async function loadChargers(city){
   clearChargers();
+  // 1) a prepared per-city charger file, if it exists
   const path = city.chargers || (city.file ? city.file.replace(/^cities\//, 'chargers/') : null);
-  if (!path) return;
+  if (path){
+    try {
+      const res = await fetch(path, { cache: 'no-store' });
+      if (res.ok){ const cj = await res.json(); if ((cj.chargers || []).length){ renderChargers(cj.chargers); return; } }
+    } catch (e){ /* fall through to the country file */ }
+  }
+  // 2) fall back to the country-wide EV file, filtered to this city's bounding box
+  const cc = COUNTRY_CC[(city.country || '').toLowerCase()];
+  const bb = cityBBox();
+  if (!cc || !bb) return;
   try {
-    const res = await fetch(path, { cache: 'no-store' });
+    const res = await fetch(`ev/${cc}.json`, { cache: 'force-cache' });   // one file per country, cached after first load
     if (!res.ok) return;
-    const cj = await res.json();
-    renderChargers(cj.chargers || []);
-  } catch (e){ /* no charger layer available */ }
+    const j = await res.json();
+    const all = j.chargers || (Array.isArray(j) ? j : []);
+    const near = all.filter(c => {
+      const la = +c.lat, lo = +c.lon;
+      return la >= bb[0] && la <= bb[2] && lo >= bb[1] && lo <= bb[3];
+    });
+    renderChargers(near);
+  } catch (e){ /* no country EV file available */ }
 }
 
 // Chargers use the same ⚡ symbol as the parking-derived EV layer, so the EV
@@ -787,55 +824,79 @@ function nearestBigTown(c){
   return best ? best.name : null;
 }
 
+// One suggestion row (a place from the country's JSON), with province code, region and
+// nearest-town disambiguation baked in. Reused for typed results and the empty-state quick picks.
+function cityRow(c){
+  const b = document.createElement('button');
+  b.className = 'city';
+  const parts = [];
+  if (c.region) parts.push(escapeHtml(c.region));
+  else if (!selectedCountry && c.country) parts.push(escapeHtml(c.country));
+  if (dupKeys.has(cityKey(c))){ const nb = nearestBigTown(c); if (nb) parts.push('near ' + escapeHtml(nb)); }
+  const sub = parts.join(' · ');
+  const code = c.prov_code ? ` <span class="cc">(${escapeHtml(c.prov_code)})</span>` : '';
+  b.innerHTML =
+    `<span><span class="nm">${escapeHtml(c.name)}</span>${code}${sub ? ` <span class="cc">${escapeHtml(sub)}</span>` : ''}</span>` +
+    `<span class="meta">${c.total ? Number(c.total).toLocaleString() + ' spots · ' + c.fee_pct + '% fee info' : ''}</span>`;
+  b.addEventListener('click', () => loadCityFile(c));
+  return b;
+}
+
+/* Place search, BeachScout-style: pick a country, type a town, get a short dropdown of
+   suggestions from that country's JSON (typo-tolerant), navigable with the keyboard. No full
+   list is dumped — when the box is empty we just hint and offer the biggest towns as quick picks. */
+let sugItems = [], sugIndex = -1;
 function buildCityList(filter){
-  const q = norm(filter.trim());
+  const q = norm((filter || '').trim());
   const pool = selectedCountry ? CITIES.filter(c => (c.country || 'Other') === selectedCountry) : CITIES;
-  let matches;
-  if (!q){
-    matches = pool.slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  } else {
-    const maxEdits = q.length <= 3 ? 1 : 2;      // stricter for very short queries
-    matches = pool.map(c => {
-      const n = norm(c.name);
-      const idx = n.indexOf(q);
-      if (idx >= 0) return { c, tier:0, score:idx };            // substring — best
-      let best = editWithin(q, n, maxEdits);                    // typo against whole name…
-      for (const w of n.split(/[\s'’\-]+/)) { const d = editWithin(q, w, maxEdits); if (d < best) best = d; }  // …or any word
-      return best <= maxEdits ? { c, tier:1, score:best } : null;
-    }).filter(Boolean)
-      .sort((a, b) => a.tier - b.tier || a.score - b.score || (a.c.name||'').length - (b.c.name||'').length)
-      .map(x => x.c);
-  }
-  const shown = matches.slice(0, 60);          // cap the DOM for big manifests
   const box = $('cityList');
-  box.innerHTML = '';
-  for (const c of shown){
-    const b = document.createElement('button');
-    b.className = 'city';
-    // region tells same names apart across regions; for a clash *within* a region, add the
-    // nearest big town ("San Martino · Lombardia · near Pavia"). Country is already chosen.
-    const parts = [];
-    if (c.region) parts.push(escapeHtml(c.region));
-    else if (!selectedCountry && c.country) parts.push(escapeHtml(c.country));
-    if (dupKeys.has(cityKey(c))){ const nb = nearestBigTown(c); if (nb) parts.push('near ' + escapeHtml(nb)); }
-    const sub = parts.join(' · ');
-    // province code (the "(PV)" sigla) right after the name — the canonical Italian tag
-    const code = c.prov_code ? ` <span class="cc">(${escapeHtml(c.prov_code)})</span>` : '';
-    b.innerHTML =
-      `<span><span class="nm">${escapeHtml(c.name)}</span>${code}${sub ? ` <span class="cc">${escapeHtml(sub)}</span>` : ''}</span>` +
-      `<span class="meta">${c.total ? Number(c.total).toLocaleString() + ' spots · ' + c.fee_pct + '% fee info' : ''}</span>`;
-    b.addEventListener('click', () => loadCityFile(c));
-    box.appendChild(b);
+  box.innerHTML = ''; sugIndex = -1;
+
+  if (!q){                                      // empty: hint + a few biggest towns to click
+    const hint = document.createElement('div'); hint.className = 'city-more';
+    hint.textContent = `Type a town name to search ${pool.length.toLocaleString()} place${pool.length !== 1 ? 's' : ''}${selectedCountry ? ' in ' + selectedCountry : ''}.`;
+    box.appendChild(hint);
+    sugItems = pool.filter(c => c.lat != null).sort((a, b) => (b.pop || b.total || 0) - (a.pop || a.total || 0)).slice(0, 6);
+    sugItems.forEach(c => box.appendChild(cityRow(c)));
+    return;
   }
+
+  const maxEdits = q.length <= 3 ? 1 : 2;       // stricter for very short queries
+  const matches = pool.map(c => {
+    const n = norm(c.name);
+    const idx = n.indexOf(q);
+    if (idx >= 0) return { c, tier:0, score:idx };            // substring — best
+    let best = editWithin(q, n, maxEdits);                    // typo against whole name…
+    for (const w of n.split(/[\s'’\-]+/)) { const d = editWithin(q, w, maxEdits); if (d < best) best = d; }  // …or any word
+    return best <= maxEdits ? { c, tier:1, score:best } : null;
+  }).filter(Boolean)
+    .sort((a, b) => a.tier - b.tier || a.score - b.score || (a.c.name || '').length - (b.c.name || '').length)
+    .map(x => x.c);
+
+  sugItems = matches.slice(0, 10);              // short dropdown, not the whole list
+  sugItems.forEach(c => box.appendChild(cityRow(c)));
   if (!matches.length){
     const d = document.createElement('div'); d.className = 'city-more';
-    d.textContent = 'No city matches — try another name.'; box.appendChild(d);
-  } else if (matches.length > shown.length){
+    d.textContent = 'No town matches — try another spelling.'; box.appendChild(d);
+  } else if (matches.length > sugItems.length){
     const d = document.createElement('div'); d.className = 'city-more';
-    d.textContent = `…and ${matches.length - shown.length} more — keep typing to narrow down.`;
-    box.appendChild(d);
+    d.textContent = `…and ${matches.length - sugItems.length} more — keep typing.`; box.appendChild(d);
   }
 }
+
+// Keyboard navigation of the dropdown (borrowed from BeachScout): ↑/↓ move, Enter opens, Esc clears.
+function highlightSuggestion(){
+  const btns = [...$('cityList').querySelectorAll('.city')];
+  btns.forEach((b, i) => b.classList.toggle('active', i === sugIndex));
+  if (sugIndex >= 0 && btns[sugIndex]) btns[sugIndex].scrollIntoView({ block: 'nearest' });
+}
+$('citySearch').addEventListener('keydown', e => {
+  const n = sugItems.length;
+  if (e.key === 'ArrowDown' && n){ sugIndex = (sugIndex + 1) % n; highlightSuggestion(); e.preventDefault(); }
+  else if (e.key === 'ArrowUp' && n){ sugIndex = (sugIndex - 1 + n) % n; highlightSuggestion(); e.preventDefault(); }
+  else if (e.key === 'Enter'){ const c = sugItems[sugIndex >= 0 ? sugIndex : 0]; if (c){ loadCityFile(c); e.preventDefault(); } }
+  else if (e.key === 'Escape'){ $('citySearch').value = ''; buildCityList(''); }
+});
 
 // Load the built city list; fall back to DEFAULT_CITIES if there's no manifest.
 async function loadManifest(){
