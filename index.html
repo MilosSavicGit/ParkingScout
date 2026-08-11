@@ -17,7 +17,7 @@
   :root{
     --ink:#1c1a17; --paper:#f4efe6; --panel:#fffdf8; --rule:#d8cfbe;
     --accent:#b5471f; --muted:#8a7f6d;
-    --free:#000000;      /* black       — fee=no        */
+    --free:#000000;      /* black       — fee=no  (with a yellow outline on the map so it stands out) */
     --paid:#8e44ad;      /* purple      — fee=yes       */
     --unknown:#2563eb;   /* blue        — no fee tag    */
     --pr:#1f9d55;        /* green       — park and ride */
@@ -86,6 +86,11 @@
     padding:0 5px;border-radius:8px;border:1px solid #fff;line-height:1.6;pointer-events:none;
     box-shadow:0 1px 2px rgba(0,0,0,.3);white-space:nowrap}
   .evmark{pointer-events:auto;cursor:pointer}
+  /* garage badge — purple "G" with a black border, so multi-storey/underground stand out */
+  .garagemark{background:var(--paid);color:#fff;border:2px solid #000;border-radius:50%;
+    width:20px;height:20px;display:flex;align-items:center;justify-content:center;
+    font-family:Georgia,serif;font-size:12px;font-weight:bold;line-height:1;
+    box-shadow:0 1px 3px rgba(0,0,0,.45);pointer-events:none}
 
   /* ---- start screen ---- */
   #start{position:fixed;inset:0;z-index:20;background:var(--paper);overflow-y:auto;
@@ -247,7 +252,14 @@ function isPR(t){ const v = String(t.park_ride ?? 'no').toLowerCase(); return v 
 function categoryOf(t){ return t.fee === 'no' ? 'free' : t.fee === 'yes' ? 'paid' : 'unknown'; }
 // "Business" parking: tagged fee=no but access=customers — a shop/garage lot you
 // can only use if you're a customer. Confusing to show as free, so we hide it.
-function isBusiness(t){ return (t.access || '') === 'customers'; }
+// A real parking structure — multi-storey / underground / garage — whatever its access tag.
+function isGarage(t){
+  const p = String(t.parking || '').toLowerCase();
+  return ['multi-storey','multistorey','underground','garage','garages','rooftop','carports'].includes(p);
+}
+// "Business" parking = a customers-only SURFACE lot (a shop's car park) — those we hide. But a
+// public/pay GARAGE is often tagged access=customers too, so we keep those and show them.
+function isBusiness(t){ return (t.access || '') === 'customers' && !isGarage(t); }
 // EV charging present here (capacity:charging tag with a real value).
 function hasEV(t){ const c = t['capacity:charging']; return c != null && c !== '' && !['0','no','none'].includes(String(c).toLowerCase()); }
 
@@ -286,10 +298,10 @@ function toGeoJSON(elements){
 
 const COLOUR = [
   'case',
-  ['==', ['get','pr'], 1], '#1f9d55',
-  ['==', ['get','cat'], 'free'], '#000000',
-  ['==', ['get','cat'], 'paid'], '#8e44ad',
-  '#2563eb'
+  ['==', ['get','pr'], 1], '#1f9d55',              // park & ride — green
+  ['==', ['get','cat'], 'free'], '#000000',        // free — black (with a yellow outline, added below)
+  ['==', ['get','cat'], 'paid'], '#8e44ad',        // paid — purple
+  '#2563eb'                                          // unknown — blue (dimmed)
 ];
 
 function currentFilter(){
@@ -326,7 +338,7 @@ function render(data){
   const els = (data.elements || []).filter(e => !isBusiness(e.tags || {}));
   const { polys, pts } = toGeoJSON(els);
 
-  for (const id of ['poly-fill','poly-line','poly-limit','pts'])  if (map.getLayer(id))  map.removeLayer(id);
+  for (const id of ['poly-fill','poly-line','poly-limit','pts','free-outline','poly-edge'])  if (map.getLayer(id))  map.removeLayer(id);
   for (const id of ['polys','pts'])                  if (map.getSource(id)) map.removeSource(id);
 
   map.addSource('polys', { type:'geojson', data: polys });
@@ -334,11 +346,14 @@ function render(data){
   // "Not recorded" (grey) marks are de-emphasised — fainter and smaller — so
   // free / paid / park&ride stay dominant and the unknowns recede to a backdrop.
   const dim = ['all', ['==', ['get','cat'], 'unknown'], ['!=', ['get','pr'], 1]];
+  const isFree = ['==', ['get','cat'], 'free'];
   map.addLayer({ id:'poly-fill', type:'fill', source:'polys',
+    layout:{ 'fill-sort-key':['case', isFree, 2, 1] },              // free areas drawn on top
     paint:{ 'fill-color': COLOUR,
-            'fill-opacity':['case', dim, 0.3, 0.5] } });
+            // free areas are more solid so they read; unknowns stay faint, paid in between
+            'fill-opacity':['case', isFree, 0.75, dim, 0.3, 0.5] } });
   map.addLayer({ id:'poly-line', type:'line', source:'polys',
-    paint:{ 'line-color': COLOUR,
+    paint:{ 'line-color': COLOUR,                                   // free's yellow comes from the dedicated top layer
             'line-width':['interpolate',['linear'],['zoom'], 10,1, 14,1.5, 17,3.5, 19,6],
             'line-opacity':['case', dim, 0.6, 1] } });
   // Time-limited spots get an amber dashed outline, so a "free" spot that's only
@@ -349,12 +364,38 @@ function render(data){
             'line-width':['interpolate',['linear'],['zoom'], 10,1.5, 17,3, 19,4.5],
             'line-dasharray':[2, 1.5] } });
   map.addLayer({ id:'pts', type:'circle', source:'pts',
-    paint:{ 'circle-radius':['interpolate',['linear'],['zoom'], 10,5, 13,9, 16,18, 19,30],
+    layout:{ 'circle-sort-key':['case', ['==', ['get','cat'], 'free'], 2, 1] },  // draw free dots on top
+    paint:{ // free parking gets a larger dot so it pops — it's the thing people are hunting for
+            'circle-radius':['case',
+              ['==', ['get','cat'], 'free'],
+              ['interpolate',['linear'],['zoom'], 10,8, 13,13, 16,25, 19,40],   // free — bigger
+              ['interpolate',['linear'],['zoom'], 10,5, 13,9,  16,18, 19,30]],  // paid / unknown
             'circle-color':COLOUR,
             'circle-opacity':['case', dim, 0.6, 1],
-            'circle-stroke-width':['interpolate',['linear'],['zoom'], 10,1.5, 16,3, 19,5],
-            'circle-stroke-color':['case', ['==', ['get','lim'], 1], '#c77d0a', '#fff'],
+            'circle-stroke-width':['case',
+              ['==', ['get','cat'], 'free'],
+              ['interpolate',['linear'],['zoom'], 10,4, 16,7, 19,11],            // bold yellow ring on free
+              ['interpolate',['linear'],['zoom'], 10,1.5, 16,3, 19,5]],
+            'circle-stroke-color':['case',
+              ['==', ['get','lim'], 1], '#c77d0a',                  // time-limited — amber ring
+              ['==', ['get','cat'], 'free'], '#ffcc00',             // free — yellow ring
+              '#fff'],
             'circle-stroke-opacity':['case', dim, 0.7, 1] } });
+
+  // Dedicated FREE outline, added last so it sits on top of every other layer — a bold yellow
+  // border that physically cannot be hidden by fills or other markers.
+  map.addLayer({ id:'free-outline', type:'line', source:'polys',
+    filter:['==', ['get','cat'], 'free'],
+    paint:{ 'line-color':'#ffd400',
+            'line-width':['interpolate',['linear'],['zoom'], 10,4, 14,9, 17,16, 19,26],
+            'line-opacity':1 } });
+  // a thin black line on top of EVERY parking area, so each reads as a crisp colored shape
+  // with a defined edge (free = yellow + black, paid = purple + black, etc.). Unknowns get a
+  // fainter edge so they still recede.
+  map.addLayer({ id:'poly-edge', type:'line', source:'polys',
+    paint:{ 'line-color':'#000000',
+            'line-width':['interpolate',['linear'],['zoom'], 10,1, 14,1.5, 17,2, 19,3],
+            'line-opacity':['case', dim, 0.4, 0.9] } });
 
   applyFilter();
   fitTo(els);
@@ -408,6 +449,17 @@ function buildLimitMarkers(els){
   for (const e of els){
     const t = e.tags || {};
     const ev = hasEV(t);
+    const cat = categoryOf(t), pr = isPR(t) ? 1 : 0;
+    // garage badge: a purple "G" with a black border on every multi-storey / underground garage
+    if (isGarage(t)){
+      const g = document.createElement('div');
+      g.className = 'garagemark';
+      g.textContent = 'G';
+      g.title = (t.parking || 'garage').replace(/_/g, ' ');
+      const gm = new maplibregl.Marker({ element: g, anchor: 'center' })
+        .setLngLat([e.lon, e.lat]).addTo(map);
+      limitMarkers.push({ el: g, marker: gm, cat, pr, ev: ev ? 1 : 0 });
+    }
     const lab = [shortDuration(t.maxstay), ev ? '⚡' : ''].filter(Boolean).join(' ');
     if (!lab) continue;
     const el = document.createElement('div');
@@ -415,7 +467,7 @@ function buildLimitMarkers(els){
     el.textContent = lab;
     const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
       .setLngLat([e.lon, e.lat]).addTo(map);
-    limitMarkers.push({ el, marker, cat: categoryOf(t), pr: isPR(t) ? 1 : 0, ev: ev ? 1 : 0 });
+    limitMarkers.push({ el, marker, cat, pr, ev: ev ? 1 : 0 });
   }
   updateLimitMarkers();
 }
@@ -452,6 +504,7 @@ function showSummary(data, s, nPoly, nPts){
         <em>unknown</em>, not free. Always check the signs before leaving the car.
       </div>
       <div class="stamp">Customers-only business parking (e.g. shop &amp; gated garages) is hidden.</div>
+      <div class="stamp" style="color:#b58900"><b>Garages marked <span style="display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;background:#8e44ad;color:#fff;border:1.5px solid #000;border-radius:50%;font:bold 10px Georgia,serif;vertical-align:middle">G</span> · EV all EU (v9)</b></div>
       ${when ? `<div class="stamp">OpenStreetMap data · updated ${escapeHtml(when)}</div>`
              : `<div class="stamp">OpenStreetMap data</div>`}
     </div>`;
@@ -557,7 +610,14 @@ function clearChargers(){
 }
 
 // Country → ISO code for the country-wide EV file (ev/<cc>.json). Extend as countries are added.
-const COUNTRY_CC = { italy: 'it', denmark: 'dk' };
+const COUNTRY_CC = {
+  'italy':'it', 'denmark':'dk', 'united kingdom':'gb', 'france':'fr', 'spain':'es',
+  'germany':'de', 'austria':'at', 'netherlands':'nl', 'belgium':'be', 'switzerland':'ch',
+  'sweden':'se', 'norway':'no', 'finland':'fi', 'ireland':'ie', 'portugal':'pt',
+  'greece':'gr', 'poland':'pl', 'czechia':'cz', 'hungary':'hu', 'romania':'ro',
+  'bulgaria':'bg', 'croatia':'hr', 'slovenia':'si', 'slovakia':'sk', 'lithuania':'lt',
+  'latvia':'lv', 'estonia':'ee', 'luxembourg':'lu', 'iceland':'is'
+};
 
 // Bounding box of the loaded city's parking (padded), so we can pull just the chargers near it
 // out of a country-wide EV file. Returns [minlat, minlon, maxlat, maxlon] or null.
@@ -829,9 +889,10 @@ function nearestBigTown(c){
 function cityRow(c){
   const b = document.createElement('button');
   b.className = 'city';
+  // show region (state/region) and country on every suggestion — matters now there are many countries
   const parts = [];
   if (c.region) parts.push(escapeHtml(c.region));
-  else if (!selectedCountry && c.country) parts.push(escapeHtml(c.country));
+  if (c.country) parts.push(escapeHtml(c.country));
   if (dupKeys.has(cityKey(c))){ const nb = nearestBigTown(c); if (nb) parts.push('near ' + escapeHtml(nb)); }
   const sub = parts.join(' · ');
   const code = c.prov_code ? ` <span class="cc">(${escapeHtml(c.prov_code)})</span>` : '';
