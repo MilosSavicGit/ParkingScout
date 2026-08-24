@@ -334,8 +334,10 @@ function fitTo(elements){
 /* ---------------- render a loaded city ---------------- */
 function render(data){
   DATA = data;
-  // Drop customers-only business parking entirely — never displayed.
-  const els = (data.elements || []).filter(e => !isBusiness(e.tags || {}));
+  // Show EVERY parking. For a driver it doesn't matter whether a spot is public, customers-only
+  // or private — what matters is that it's there. Access is still shown in the popup so people
+  // can check whether they're allowed, but nothing is hidden from the map anymore.
+  const els = (data.elements || []);
   const { polys, pts } = toGeoJSON(els);
 
   for (const id of ['poly-fill','poly-line','poly-limit','pts','free-outline','poly-edge'])  if (map.getLayer(id))  map.removeLayer(id);
@@ -366,16 +368,21 @@ function render(data){
   map.addLayer({ id:'pts', type:'circle', source:'pts',
     layout:{ 'circle-sort-key':['case', ['==', ['get','cat'], 'free'], 2, 1] },  // draw free dots on top
     paint:{ // free parking gets a larger dot so it pops — it's the thing people are hunting for
-            'circle-radius':['case',
-              ['==', ['get','cat'], 'free'],
-              ['interpolate',['linear'],['zoom'], 10,8, 13,13, 16,25, 19,40],   // free — bigger
-              ['interpolate',['linear'],['zoom'], 10,5, 13,9,  16,18, 19,30]],  // paid / unknown
+            // ONE interpolate on the outside, the free/other choice inside each stop.
+            // MapLibre allows only one zoom-based subexpression per property; two
+            // interpolates inside a 'case' throws, addLayer fails, and every later
+            // setFilter('pts') then errors with "Cannot filter non-existing layer".
+            'circle-radius':['interpolate',['linear'],['zoom'],
+              10, ['case', isFree,  8,  5],
+              13, ['case', isFree, 13,  9],
+              16, ['case', isFree, 25, 18],
+              19, ['case', isFree, 40, 30]],
             'circle-color':COLOUR,
             'circle-opacity':['case', dim, 0.6, 1],
-            'circle-stroke-width':['case',
-              ['==', ['get','cat'], 'free'],
-              ['interpolate',['linear'],['zoom'], 10,4, 16,7, 19,11],            // bold yellow ring on free
-              ['interpolate',['linear'],['zoom'], 10,1.5, 16,3, 19,5]],
+            'circle-stroke-width':['interpolate',['linear'],['zoom'],
+              10, ['case', isFree,  4, 1.5],                                     // bold yellow ring on free
+              16, ['case', isFree,  7, 3],
+              19, ['case', isFree, 11, 5]],
             'circle-stroke-color':['case',
               ['==', ['get','lim'], 1], '#c77d0a',                  // time-limited — amber ring
               ['==', ['get','cat'], 'free'], '#ffcc00',             // free — yellow ring
@@ -503,8 +510,8 @@ function showSummary(data, s, nPoly, nPts){
         The remaining ${(100 - pct).toFixed(1)}% is not tagged either way — it is
         <em>unknown</em>, not free. Always check the signs before leaving the car.
       </div>
-      <div class="stamp">Customers-only business parking (e.g. shop &amp; gated garages) is hidden.</div>
-      <div class="stamp" style="color:#b58900"><b>Garages marked <span style="display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;background:#8e44ad;color:#fff;border:1.5px solid #000;border-radius:50%;font:bold 10px Georgia,serif;vertical-align:middle">G</span> · EV all EU (v9)</b></div>
+      <div class="stamp">All parking shown — public, customers-only and private. Access (if known) is in each spot's popup; always check the signs.</div>
+      <div class="stamp" style="color:#b58900"><b>Garages marked <span style="display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;background:#8e44ad;color:#fff;border:1.5px solid #000;border-radius:50%;font:bold 10px Georgia,serif;vertical-align:middle">G</span> · All parking · EV Europe (v11)</b></div>
       ${when ? `<div class="stamp">OpenStreetMap data · updated ${escapeHtml(when)}</div>`
              : `<div class="stamp">OpenStreetMap data</div>`}
     </div>`;
@@ -616,8 +623,19 @@ const COUNTRY_CC = {
   'sweden':'se', 'norway':'no', 'finland':'fi', 'ireland':'ie', 'portugal':'pt',
   'greece':'gr', 'poland':'pl', 'czechia':'cz', 'hungary':'hu', 'romania':'ro',
   'bulgaria':'bg', 'croatia':'hr', 'slovenia':'si', 'slovakia':'sk', 'lithuania':'lt',
-  'latvia':'lv', 'estonia':'ee', 'luxembourg':'lu', 'iceland':'is'
+  'latvia':'lv', 'estonia':'ee', 'luxembourg':'lu', 'iceland':'is',
+  // batch 2 — non-EU Europe + Russia/Belarus/Ukraine/Turkey
+  'russia':'ru', 'belarus':'by', 'ukraine':'ua', 'serbia':'rs', 'turkey':'tr',
+  'north macedonia':'mk', 'moldova':'md', 'bosnia and herzegovina':'ba',
+  'albania':'al', 'montenegro':'me', 'kosovo':'xk'
 };
+
+// Country EV files are a few MB. Hold them for the session so switching between two
+// cities in the same country doesn't refetch. Only successful loads are stored.
+const EV_CACHE = new Map();
+// How far from the city centre a charger still counts as "in this city", used only
+// when the parking data can't give us a real bounding box.
+const EV_FALLBACK_KM = 35;
 
 // Bounding box of the loaded city's parking (padded), so we can pull just the chargers near it
 // out of a country-wide EV file. Returns [minlat, minlon, maxlat, maxlon] or null.
@@ -650,19 +668,56 @@ async function loadChargers(city){
   }
   // 2) fall back to the country-wide EV file, filtered to this city's bounding box
   const cc = COUNTRY_CC[(city.country || '').toLowerCase()];
-  const bb = cityBBox();
-  if (!cc || !bb) return;
-  try {
-    const res = await fetch(`ev/${cc}.json`, { cache: 'force-cache' });   // one file per country, cached after first load
-    if (!res.ok) return;
-    const j = await res.json();
-    const all = j.chargers || (Array.isArray(j) ? j : []);
-    const near = all.filter(c => {
-      const la = +c.lat, lo = +c.lon;
-      return la >= bb[0] && la <= bb[2] && lo >= bb[1] && lo <= bb[3];
-    });
-    renderChargers(near);
-  } catch (e){ /* no country EV file available */ }
+  if (!cc){
+    console.warn(`EV: no country code for "${city.country}" — add it to COUNTRY_CC`);
+    return;
+  }
+
+  // A missing bounding box used to abort the whole function, which meant one
+  // unusual city silently lost every charger in its country. Fall back to a box
+  // around the city's own coordinates instead.
+  let bb = cityBBox();
+  if (!(Array.isArray(bb) && bb.length === 4 && bb.every(n => Number.isFinite(+n)))){
+    const la = +city.lat, lo = +city.lon;
+    if (!Number.isFinite(la) || !Number.isFinite(lo)){
+      console.warn(`EV: no bbox and no coordinates for ${city.name}`);
+      return;
+    }
+    const dLat = EV_FALLBACK_KM / 111;
+    const dLon = EV_FALLBACK_KM / (111 * Math.max(0.2, Math.cos(la * Math.PI / 180)));
+    bb = [la - dLat, lo - dLon, la + dLat, lo + dLon];
+    console.info(`EV: no parking bbox for ${city.name}, using ${EV_FALLBACK_KM} km around the centre`);
+  }
+
+  let all = EV_CACHE.get(cc);
+  if (!all){
+    try {
+      // 'default' honours the server's caching headers: still cached, but a newer
+      // build reaches the user. 'force-cache' pinned whatever came back FIRST —
+      // including a 404 — for the rest of the session. Same failure-caching bug
+      // that was fixed in BeachScout and EVchargeScout.
+      const res = await fetch(`ev/${cc}.json`, { cache: 'default' });
+      if (!res.ok){
+        console.warn(`EV: ev/${cc}.json returned ${res.status}`);
+        return;                                  // a real answer — but nothing worth keeping
+      }
+      const j = await res.json();
+      all = j.chargers || (Array.isArray(j) ? j : []);
+      EV_CACHE.set(cc, all);                     // only a SUCCESSFUL load is remembered
+    } catch (e){
+      console.warn(`EV: could not fetch ev/${cc}.json —`, e.message);
+      return;                                    // learned nothing; retry next time
+    }
+  }
+
+  const near = all.filter(c => {
+    const la = +c.lat, lo = +c.lon;
+    return la >= bb[0] && la <= bb[2] && lo >= bb[1] && lo <= bb[3];
+  });
+  if (all.length && !near.length){
+    console.info(`EV: ${all.length} chargers in ${cc}, none inside ${city.name}'s box`);
+  }
+  renderChargers(near);
 }
 
 // Chargers use the same ⚡ symbol as the parking-derived EV layer, so the EV
